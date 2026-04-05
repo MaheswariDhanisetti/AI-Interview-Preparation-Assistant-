@@ -1,0 +1,105 @@
+const { GoogleGenAI } = require("@google/genai")
+const { z } = require("zod")
+const { zodToJsonSchema } = require("zod-to-json-schema")
+const puppeteer = require("puppeteer")
+
+const ai = new GoogleGenAI({
+    apiKey: process.env.GOOGLE_GENAI_API_KEY
+})
+
+const interviewReportSchema = z.object({
+    matchScore: z.number().describe("A score between 0 and 100 indicating how well the candidate's profile matches the job description"),
+    technicalQuestions: z.array(z.object({
+        question: z.string().describe("The technical question that can be asked in the interview"),
+        intention: z.string().describe("The intention of interviewer behind asking this question"),
+        answer: z.string().describe("How to answer this question, including approach and key points")
+    })).describe("Technical questions that can be asked in the interview"),
+    behavioralQuestions: z.array(z.object({
+        question: z.string().describe("The behavioral question that can be asked in the interview"),
+        intention: z.string().describe("The intention of interviewer behind asking this question"),
+        answer: z.string().describe("How to answer this question, including approach and key points")
+    })).describe("Behavioral questions that can be asked in the interview"),
+    skillGaps: z.array(z.object({
+        skill: z.string().describe("The skill that candidate should improve"),
+        severity: z.enum([ "low", "medium", "high" ]).describe("Severity of this skill gap")
+    })).describe("Skill gaps in the candidate profile"),
+    preparationPlan: z.array(z.object({
+        day: z.number().describe("The day number in the preparation plan"),
+        focus: z.string().describe("Main focus for this day"),
+        tasks: z.array(z.string()).describe("Tasks to complete for this day")
+    })).describe("A day-wise preparation plan"),
+    title: z.string().describe("The job title for the interview report")
+})
+
+function ensureAiConfigured() {
+    if (!process.env.GOOGLE_GENAI_API_KEY) {
+        throw new Error("GOOGLE_GENAI_API_KEY is missing. Add it in Backend/.env")
+    }
+}
+
+async function generateInterviewReport({ resume, selfDescription, jobDescription }) {
+    ensureAiConfigured()
+
+    const prompt = `Generate an interview report for a candidate with the following details:\nResume: ${resume}\nSelf Description: ${selfDescription}\nJob Description: ${jobDescription}`
+
+    const response = await ai.models.generateContent({
+        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(interviewReportSchema),
+        }
+    })
+
+    return JSON.parse(response.text)
+}
+
+async function generatePdfFromHtml(htmlContent) {
+    const browser = await puppeteer.launch({
+        headless: true,
+        args: [ "--no-sandbox", "--disable-setuid-sandbox" ]
+    })
+
+    const page = await browser.newPage()
+    await page.setContent(htmlContent, { waitUntil: "networkidle0" })
+
+    const pdfBuffer = await page.pdf({
+        format: "A4",
+        margin: {
+            top: "20mm",
+            bottom: "20mm",
+            left: "15mm",
+            right: "15mm"
+        },
+        printBackground: true
+    })
+
+    await browser.close()
+
+    return pdfBuffer
+}
+
+async function generateResumePdf({ resume, selfDescription, jobDescription }) {
+    ensureAiConfigured()
+
+    const resumePdfSchema = z.object({
+        html: z.string().describe("HTML content for resume rendering")
+    })
+
+    const prompt = `Generate a professional ATS-friendly resume in HTML using the following details:\nResume: ${resume}\nSelf Description: ${selfDescription}\nJob Description: ${jobDescription}\nReturn only JSON with one field named html.`
+
+    const response = await ai.models.generateContent({
+        model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: zodToJsonSchema(resumePdfSchema),
+        }
+    })
+
+    const jsonContent = JSON.parse(response.text)
+
+    return generatePdfFromHtml(jsonContent.html)
+}
+
+module.exports = { generateInterviewReport, generateResumePdf }
